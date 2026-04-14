@@ -1,0 +1,23 @@
+fastapi==0.111.0
+uvicorn==0.30.1
+langchain==0.3.14
+langchain-community==0.3.14
+langchain-google-genai==2.0.7
+pinecone-client
+langchain-pinecone
+biopython==1.84
+pydantic==2.8.2
+python-dotenv==1.0.1
+pytest==8.2.2
+pypdf==4.2.0
+tqdm==4.66.4
+tiktoken==0.7.0
+requests==2.32.3
+google-genai
+supabase
+posthog
+presidio-analyzer
+presidio-anonymizer
+# WhatsApp Bot
+twilio>=9.0.0
+python-multipart>=0.0.9
