@@ -1,14 +1,19 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, MessageSquare, BookOpen, Newspaper, X, Stethoscope } from 'lucide-react';
+import { NavLink, useNavigate } from 'react-router-dom';
+import { LayoutDashboard, MessageSquare, BookOpen, X, LogOut } from 'lucide-react';
+import { supabase } from '../services/supabase';
 
 const Sidebar = ({ isOpen, onClose }) => {
+  const navigate = useNavigate();
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/auth');
+  };
+
   const navItems = [
-    { icon: LayoutDashboard, label: 'Control Center', to: '/' },
+    { icon: LayoutDashboard, label: 'Clinical Feeds', to: '/' },
     { icon: MessageSquare, label: 'MediChat AI', to: '/chat' },
-    { icon: Stethoscope, label: 'DDx Assistant', to: '/ddx', premium: true },
     { icon: BookOpen, label: 'Quizzes', to: '/quizzes' },
-    { icon: Newspaper, label: 'Daily Briefing', to: '/briefing', premium: true },
   ];
 
   return (
@@ -36,7 +41,7 @@ const Sidebar = ({ isOpen, onClose }) => {
             <item.icon size={20} className="nav-icon" />
             <span className="nav-label">{item.label}</span>
             {item.premium && (
-              <span className="badge badge-premium shadow-glow">PRO</span>
+               <span className="badge badge-premium shadow-glow">PRO</span>
             )}
           </NavLink>
         ))}
@@ -51,6 +56,9 @@ const Sidebar = ({ isOpen, onClose }) => {
             <span className="user-name">Dr. Swetha</span>
             <span className="user-role">Residency PGY-2</span>
           </div>
+          <button onClick={handleLogout} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', marginLeft: 'auto' }} title="Log Out">
+            <LogOut size={16} />
+          </button>
         </div>
       </div>
     </aside>

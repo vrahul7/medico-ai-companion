@@ -1,201 +1,219 @@
 """
-research.py — Live Medical Research Feed
-=========================================
-GET /api/research/feed?page=1&topic=general
+research.py — Live Medical Research & Guidelines Feeds
+======================================================
+Provides structural feeds:
+  1. GET /api/research/scholarly : PubMed articles + AI Summaries
+  2. GET /api/research/guidelines: Curated RSS Feeds (WHO, CDC, etc)
 
-Fetches the 5 most recent high-impact PubMed articles per page,
-then uses Gemini to generate a 3-sentence clinical summary of each
-abstract so physicians can quickly scan new evidence without reading
-the full paper.
-
-Pages are 1-indexed. Each call returns 5 articles.
+Summary provider: OpenAI gpt-4o-mini (primary) → Gemini (fallback)
 """
 
 import os
 import time
 import logging
-from typing import List, Optional
+import re
+from typing import List
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import hashlib
 from Bio import Entrez
 import google.generativeai as genai
+from app.services.llm_provider import get_openai_client, ACTIVE_PROVIDER, PROVIDER_OPENAI, GEMINI_API_KEY
+from app.services.supabase_client import get_cached_summary, cache_summary
+
+from app.services.rss_fetcher import fetch_rss_guidelines, RSSItem
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# ── Entrez Setup ──────────────────────────────────────────────────────────
+# ── Entrez Setup ──
 Entrez.email   = os.getenv("ENTREZ_EMAIL", "medico@example.com")
 Entrez.api_key = os.getenv("NCBI_API_KEY")
 
-# ── Gemini Setup ──────────────────────────────────────────────────────────
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# ── Gemini Setup (fallback) ──
+genai.configure(api_key=GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", ""))
 _gemini = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",   # Flash for speed on summaries
+    model_name="gemini-1.5-flash",
     generation_config={"temperature": 0.2, "max_output_tokens": 200}
 )
+# ── OpenAI client (primary) ──
+_openai_client = get_openai_client()
 
-# ── Data Models ───────────────────────────────────────────────────────────
 class ResearchArticle(BaseModel):
     pmid: str
     title: str
     journal: str
     year: str
     authors: str
-    summary: str          # Gemini-generated 3-sentence clinical summary
-    abstract: str         # Full abstract for expanded view
+    summary: str
+    abstract: str
     pubmed_url: str
+    pdf_url: str | None = None
 
-class ResearchFeedResponse(BaseModel):
+class ScholarlyFeedResponse(BaseModel):
     articles: List[ResearchArticle]
     page: int
     total_found: int
     has_more: bool
 
-# ── Research Topics ───────────────────────────────────────────────────────
+class GuidelinesFeedResponse(BaseModel):
+    guidelines: List[RSSItem]
+
 TOPIC_QUERIES = {
     "general":     "medicine[MeSH Major Topic] AND clinical trial[pt]",
     "pediatrics":  "pediatrics[MeSH Major Topic] AND clinical trial[pt]",
     "cardiology":  "cardiology[MeSH Major Topic] AND clinical trial[pt]",
     "neurology":   "neurology[MeSH Major Topic] AND clinical trial[pt]",
-    "infectious":  "infectious disease[MeSH Major Topic] AND clinical trial[pt]",
-    "emergency":   "emergency medicine[MeSH Major Topic]",
 }
 
 PAGE_SIZE = 5
 
-@router.get("/research/feed", response_model=ResearchFeedResponse)
-async def get_research_feed(
-    page: int = Query(default=1, ge=1, description="Page number, 1-indexed"),
-    topic: str = Query(default="general", description="Medical topic filter"),
+@router.get("/research/scholarly", response_model=ScholarlyFeedResponse)
+async def get_scholarly_feed(
+    page: int = Query(default=1, ge=1),
+    topic: str = Query(default="general"),
 ):
-    """
-    Returns 5 latest PubMed articles with AI-generated clinical summaries.
-    Sorted by publication date descending (newest first).
-    """
     query = TOPIC_QUERIES.get(topic, TOPIC_QUERIES["general"])
     retstart = (page - 1) * PAGE_SIZE
 
-    # ── Step 1: Search PubMed ─────────────────────────────────────────────
     try:
         search_handle = Entrez.esearch(
-            db="pubmed",
-            term=query,
-            retmax=PAGE_SIZE,
-            retstart=retstart,
-            sort="pub+date",    # Newest first
-            usehistory="y",
+            db="pubmed", term=query, retmax=PAGE_SIZE, retstart=retstart, 
+            sort="pub+date", usehistory="y"
         )
         search_results = Entrez.read(search_handle)
         search_handle.close()
     except Exception as e:
-        logger.error(f"PubMed search failed: {e}")
-        raise HTTPException(status_code=502, detail="PubMed search service unavailable")
+        logger.error(str(e))
+        raise HTTPException(status_code=502, detail="PubMed unavailable")
 
     ids = search_results.get("IdList", [])
     total_found = int(search_results.get("Count", 0))
 
     if not ids:
-        return ResearchFeedResponse(articles=[], page=page, total_found=0, has_more=False)
+        return ScholarlyFeedResponse(articles=[], page=page, total_found=0, has_more=False)
 
-    # ── Step 2: Fetch full article metadata ───────────────────────────────
-    try:
-        fetch_handle = Entrez.efetch(
-            db="pubmed",
-            id=",".join(ids),
-            rettype="abstract",
-            retmode="xml"
-        )
-        records = Entrez.read(fetch_handle)
-        fetch_handle.close()
-    except Exception as e:
-        logger.error(f"PubMed fetch failed: {e}")
-        raise HTTPException(status_code=502, detail="PubMed fetch service unavailable")
+    # Fetch batch
+    fetch_handle = Entrez.efetch(db="pubmed", id=",".join(ids), rettype="abstract", retmode="xml")
+    records = Entrez.read(fetch_handle)
+    fetch_handle.close()
 
-    # ── Step 3: Parse + Summarize each article ────────────────────────────
-    articles: List[ResearchArticle] = []
-    for article_rec in records.get("PubmedArticle", []):
+    articles = []
+    for art_rec in records.get("PubmedArticle", []):
         try:
-            medline   = article_rec["MedlineCitation"]
-            art       = medline["Article"]
-            pmid      = str(medline["PMID"])
-            title     = str(art.get("ArticleTitle", "Untitled")).strip()
+            medline = art_rec["MedlineCitation"]
+            art = medline["Article"]
+            pmid = str(medline["PMID"])
+            title = str(art.get("ArticleTitle", "Untitled")).strip()
+            
+            abs_parts = art.get("Abstract", {}).get("AbstractText", [])
+            abstract = " ".join(str(p) for p in abs_parts).strip() if isinstance(abs_parts, list) else str(abs_parts).strip()
+            if len(abstract) < 60: continue
 
-            # Abstract
-            abstract_obj = art.get("Abstract", {})
-            abstract_parts = abstract_obj.get("AbstractText", [])
-            if isinstance(abstract_parts, list):
-                abstract = " ".join(str(p) for p in abstract_parts).strip()
-            else:
-                abstract = str(abstract_parts).strip()
-
-            if not abstract or len(abstract) < 60:
-                continue   # Skip articles without useful abstracts
-
-            # Journal + year
-            journal_obj = art.get("Journal", {})
-            journal     = str(journal_obj.get("Title", "Unknown Journal"))
-            pub_date    = journal_obj.get("JournalIssue", {}).get("PubDate", {})
-            year        = str(pub_date.get("Year", pub_date.get("MedlineDate", "2025")))
-
-            # Authors
-            author_list = art.get("AuthorList", [])
-            if author_list:
-                first = author_list[0]
-                last_name  = first.get("LastName", "")
-                fore_name  = first.get("ForeName", "")
-                authors = f"{last_name} {fore_name}"
-                if len(author_list) > 1:
-                    authors += f" et al."
-            else:
-                authors = "Unknown Authors"
-
-            # ── Gemini summary ────────────────────────────────────────────
+            journal = str(art.get("Journal", {}).get("Title", "Unknown"))
+            pub_date = art.get("Journal", {}).get("JournalIssue", {}).get("PubDate", {})
+            year = str(pub_date.get("Year", pub_date.get("MedlineDate", "2024")))
+            
             summary = _generate_summary(title, abstract)
 
             articles.append(ResearchArticle(
-                pmid=pmid,
-                title=title,
-                journal=journal,
-                year=year,
-                authors=authors,
-                summary=summary,
-                abstract=abstract,
-                pubmed_url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                pmid=pmid, title=title, journal=journal, year=year,
+                authors="Et al.", summary=summary, abstract=abstract,
+                pubmed_url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             ))
-
-            # Brief pause between Gemini calls to avoid 429
-            time.sleep(0.5)
-
-        except Exception as parse_err:
-            logger.warning(f"Skipping article due to parse error: {parse_err}")
+        except Exception as e:
             continue
 
-    has_more = (retstart + PAGE_SIZE) < total_found
-    return ResearchFeedResponse(
-        articles=articles,
-        page=page,
-        total_found=total_found,
-        has_more=has_more,
-    )
+    # Fetch and merge OpenAlex
+    from app.services.live_sources import live_sources
+    try:
+        # We fetch OpenAlex and just grab the top 2 highly cited OA articles for the UI feed
+        oa_docs = live_sources.openalex.search(query)[:2]
+        for doc in oa_docs:
+            abstract = doc.page_content
+            title = doc.metadata.get("title", "Untitled")
+            summary = _generate_summary(title, abstract)
+            doi_ending = doc.metadata.get("doi", "").split("/")[-1] or str(hash(title))[:8]
+            
+            articles.append(ResearchArticle(
+                pmid=f"OA-{doi_ending}",
+                title=title,
+                journal=doc.metadata.get("book_name", "").replace("OpenAlex: ", ""),
+                year=doc.metadata.get("section", "2024"),
+                authors="OA Authors",
+                summary=summary,
+                abstract=abstract,
+                pubmed_url=doc.metadata.get("url", ""),
+                pdf_url=doc.metadata.get("full_text_url")
+            ))
+    except Exception as e:
+        logger.warning(f"Failed to merge OpenAlex: {e}")
 
+    has_more = (retstart + PAGE_SIZE) < total_found
+    return ScholarlyFeedResponse(articles=articles, page=page, total_found=total_found, has_more=has_more)
+
+
+@router.get("/research/guidelines", response_model=GuidelinesFeedResponse)
+async def get_guidelines_feed(
+    page: int = Query(default=1, ge=1)
+):
+    """Returns curated RSS guidelines"""
+    try:
+        items = fetch_rss_guidelines(page=page)
+        # Inject an AI Summary for each guideline so it matches the scholarly UI format
+        for item in items:
+            if not item.summary or len(item.summary) < 20:
+                item_data = f"Guideline Title: {item.title}"
+            else:
+                item_data = f"Title: {item.title}. Meta: {item.summary}"
+            
+            ai_summary = _generate_summary("Medical Guideline", item_data)
+            item.summary = ai_summary # Override the raw source tag with AI summary
+        
+        return GuidelinesFeedResponse(guidelines=items)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 def _generate_summary(title: str, abstract: str) -> str:
-    """Uses Gemini Flash to generate a 2-3 sentence clinical summary."""
-    prompt = f"""You are a senior physician writing for a clinical bulletin aimed at medical residents.
-Write a concise 2-3 sentence summary of this research for a busy doctor.
-Focus on: what was studied, key finding, and clinical relevance.
-Be direct. No filler phrases like "This study". Start with the main finding.
+    """Generates a 2-3 sentence clinical summary. Uses OpenAI gpt-4o-mini (cheap + fast) → Gemini fallback."""
+    # Strip raw HTML tags sometimes present in PubMed abstracts
+    clean_abstract = re.sub(r'<[^>]+>', '', abstract)
 
-Title: {title}
-Abstract: {abstract[:1500]}
+    # Check Supabase cache first (avoids duplicate LLM calls)
+    content_hash = hashlib.sha256(f"{title}:{clean_abstract}".encode('utf-8')).hexdigest()
+    cached = get_cached_summary(content_hash)
+    if cached:
+        return cached
 
-2-3 sentence clinical summary:"""
+    prompt = (
+        f"Summarize this clinical paper/guideline for a busy physician in 2-3 clear sentences. "
+        f"Be specific about key findings. No markdown bold tags.\n"
+        f"Title: {title}\nAbstract: {clean_abstract[:1500]}"
+    )
+
+    # ── Try OpenAI gpt-4o-mini first (cost-efficient at ~$0.15/1M tokens) ──
+    if ACTIVE_PROVIDER == PROVIDER_OPENAI and _openai_client:
+        try:
+            completion = _openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=200,
+            )
+            final_summary = completion.choices[0].message.content.strip().replace("**", "")
+            cache_summary(content_hash, final_summary)
+            return final_summary
+        except Exception as e:
+            logger.warning(f"[Research] OpenAI summary failed, using Gemini: {e}")
+
+    # ── Fallback: Gemini ──
     try:
         response = _gemini.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.warning(f"Gemini summary failed for PMID, using abstract snippet: {e}")
-        return abstract[:280] + "..."
+        final_summary = response.text.strip().replace("**", "")
+        cache_summary(content_hash, final_summary)
+        return final_summary
+    except Exception:
+        return clean_abstract[:280] + "..."

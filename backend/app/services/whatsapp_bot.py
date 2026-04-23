@@ -21,12 +21,17 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
-# ── Approved Whitelist ──────────────────────────────────────────────────────
-# Stored in env as comma-separated E.164 numbers: +919876543210,+918765432109
-# Twilio sends numbers in format: whatsapp:+919876543210
+def _normalize_phone(num: str) -> str:
+    """Removes all non-digit characters except the leading '+' and 'whatsapp:' prefix."""
+    prefix = "whatsapp:" if num.startswith("whatsapp:") else ""
+    digits = "".join(filter(str.isdigit, num))
+    if not digits: return ""
+    # Ensure it starts with the country code
+    return f"{prefix}+{digits}"
+
 _RAW_WHITELIST = os.getenv("WHATSAPP_APPROVED_NUMBERS", "")
 APPROVED_NUMBERS: set = {
-    f"whatsapp:{n.strip()}" for n in _RAW_WHITELIST.split(",") if n.strip()
+    _normalize_phone(n.strip()) for n in _RAW_WHITELIST.split(",") if n.strip()
 }
 
 # ── Rate Limiter (in-memory, per phone number per day) ─────────────────────
@@ -100,10 +105,18 @@ class WhatsAppBotService:
     def is_approved(self, from_number: str) -> bool:
         """Check if incoming number is in the whitelist."""
         if not APPROVED_NUMBERS:
-            # If no whitelist configured, log warning and deny all
             logger.warning("WHATSAPP_APPROVED_NUMBERS not set — all access denied.")
             return False
-        return from_number in APPROVED_NUMBERS
+        
+        normalized_from = _normalize_phone(from_number).replace("whatsapp:", "")
+        # Also check against the raw from_number just in case
+        is_ok = normalized_from in APPROVED_NUMBERS or from_number.replace("whatsapp:", "") in APPROVED_NUMBERS
+        
+        if not is_ok:
+            logger.warning(f"[Auth] Access denied for: {from_number} (Normalized: {normalized_from})")
+            logger.warning(f"[Auth] Whitelist contains: {list(APPROVED_NUMBERS)}")
+            
+        return is_ok
 
     def check_rate_limit(self, from_number: str) -> bool:
         """Returns True if doctor is within daily query limit."""
@@ -212,7 +225,7 @@ class WhatsAppBotService:
         reply = self._format_whatsapp_response(result)
 
         # ── 9. Save to session + increment usage ──────────────────────────
-        self.save_to_session(from_number, body, result.get("clinical_answer", ""))
+        self.save_to_session(from_number, body, result.get("answer", ""))
         self.increment_usage(from_number)
 
         # Prepend welcome for first-time users
@@ -226,7 +239,7 @@ class WhatsAppBotService:
         WhatsApp supports *bold*, _italic_, ~strikethrough~, ```code```.
         Max safe message length: ~1500 chars.
         """
-        answer = result.get("clinical_answer", "No answer generated.")
+        answer = result.get("answer") or result.get("clinical_answer") or "No answer generated."
         citations = result.get("citations", [])
         confidence = result.get("confidence_score", 0.0)
 

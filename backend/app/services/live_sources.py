@@ -20,6 +20,7 @@ from langchain.docstore.document import Document
 
 # BioPython Entrez for PubMed
 from Bio import Entrez
+from .rss_fetcher import fetch_rss_guidelines
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,26 @@ class LiveSourcesManager:
             all_docs.extend(oa_docs)
         except Exception as e:
             logger.error(f"OpenAlex pipeline error: {e}")
+
+        # --- RSS Guidelines ---
+        try:
+            rss_items = fetch_rss_guidelines(limit_per_feed=2)
+            for item in rss_items:
+                # Basic keyword matching since RSS is not vectorized yet
+                # Fallback to include it if the query is broad
+                all_docs.append(Document(
+                    page_content=item.summary,
+                    metadata={
+                        "source_type": "rss_guideline",
+                        "book_name": f"Guideline: {item.source}",
+                        "chapter": "Latest Alert",
+                        "section": item.published,
+                        "title": item.title,
+                        "url": item.link,
+                    }
+                ))
+        except Exception as e:
+            logger.error(f"RSS Guideline pipeline error: {e}")
 
         logger.info(f"LiveSourcesManager: Total {len(all_docs)} live documents fetched.")
         return all_docs
