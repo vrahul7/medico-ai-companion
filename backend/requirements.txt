@@ -18,8 +18,6 @@ openai>=1.30.0
 google-genai
 supabase
 posthog
-presidio-analyzer
-presidio-anonymizer
 # WhatsApp Bot
 twilio>=9.0.0
 python-multipart>=0.0.9
