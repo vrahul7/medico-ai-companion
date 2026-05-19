@@ -1,4 +1,4 @@
-# 🩺 Medico AI Companion
+   # 🩺 Medico AI Companion
 ### Clinical Intelligence Synthesis & Physician Support Bot
 
 Medico AI is a high-performance Hybrid RAG (Retrieval-Augmented Generation) platform designed for pediatricians. It synthesizes clinical knowledge from Gold Standard textbooks (Nelson, Piyush Gupta) and live medical research feeds.
