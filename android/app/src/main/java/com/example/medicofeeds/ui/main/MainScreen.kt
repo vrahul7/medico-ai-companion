@@ -40,36 +40,6 @@ fun MainScreen(
     var selectedTab by remember { mutableStateOf(0) }
 
     Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Text(
-                        text = when (selectedTab) {
-                            0 -> "CLINICAL GUIDELINES"
-                            1 -> "RESEARCH FEEDS"
-                            2 -> "MEDICAL CALCULATORS"
-                            else -> "PROFILE & BOOKMARKS"
-                        },
-                        fontWeight = FontWeight.Bold,
-                        color = SlatePrimary,
-                        fontSize = 16.sp,
-                        letterSpacing = 1.sp
-                    )
-                },
-                actions = {
-                    IconButton(onClick = onSignOut) {
-                        Icon(
-                            imageVector = Icons.Default.ExitToApp,
-                            contentDescription = "Sign Out",
-                            tint = SlatePrimary
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = DarkCanvas
-                )
-            )
-        },
         bottomBar = {
             NavigationBar(
                 containerColor = CardBg,
@@ -165,7 +135,7 @@ fun MainScreen(
                 }
                 3 -> {
                     // Profile & Bookmarks Tab
-                    ProfileScreen(repository = repository)
+                    ProfileScreen(repository = repository, onSignOut = onSignOut)
                 }
             }
         }

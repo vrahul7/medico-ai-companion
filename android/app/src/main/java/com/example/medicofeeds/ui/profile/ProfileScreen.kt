@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Launch
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,7 +32,8 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun ProfileScreen(
-    repository: DataRepository
+    repository: DataRepository,
+    onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -87,7 +89,7 @@ fun ProfileScreen(
                 
                 Spacer(modifier = Modifier.width(16.dp))
                 
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = userEmail,
                         color = TextWhite,
@@ -100,6 +102,15 @@ fun ProfileScreen(
                         color = SlatePrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
+                    )
+                }
+                
+                IconButton(onClick = onSignOut) {
+                    Icon(
+                        imageVector = Icons.Default.ExitToApp,
+                        contentDescription = "Sign Out",
+                        tint = ErrorRed,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }

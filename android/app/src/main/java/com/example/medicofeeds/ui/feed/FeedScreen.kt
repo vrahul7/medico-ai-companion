@@ -173,13 +173,13 @@ fun FeedScreen(
                                     onReadClick = { activeViewUrl = item.fullTextUrl },
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
                                 )
                             } else {
                                 LoadingCard(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
                                 )
                             }
                         }
