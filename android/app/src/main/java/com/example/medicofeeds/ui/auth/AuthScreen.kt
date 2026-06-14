@@ -276,6 +276,14 @@ fun AuthScreen(onAuthSuccess: () -> Unit) {
             Button(
                 onClick = {
                     if (!canSubmit) return@Button
+
+                    // Hardcoded credentials bypass for local testing
+                    val inputEmail = email.trim()
+                    if (inputEmail.equals("vgrahul7@gmail.com", ignoreCase = true) && password == "123456789") {
+                        onAuthSuccess()
+                        return@Button
+                    }
+
                     loading = true
                     errorMessage = null
 
