@@ -34,7 +34,9 @@ object MedicalCalculators {
         QtcCalculator,
         ApgarCalculator,
         GcsCalculator,
-        WellsPeCalculator
+        WellsPeCalculator,
+        GestationalWeeksCalculator,
+        GrowthMonitoringCalculator
     )
 
     fun getById(id: String): Calculator? {
@@ -338,6 +340,153 @@ object WellsPeCalculator : Calculator() {
             value = String.format("%.1f points", score),
             interpretation = interpretation,
             status = status
+        )
+    }
+}
+
+// 9. Gestational Weeks & EDD Calculator
+object GestationalWeeksCalculator : Calculator() {
+    override val id = "gestational"
+    override val name = "Gestational Weeks & EDD"
+    override val description = "Calculates current Gestational Age and Estimated Date of Delivery (EDD) using Last Menstrual Period (LMP)."
+    override val inputs = listOf(
+        InputField("day", "LMP Day of Month (1-31)", InputType.Number, "14"),
+        InputField("month", "LMP Month (1-12)", InputType.Number, "10"),
+        InputField("year", "LMP Year (4-digit)", InputType.Number, "2025")
+    )
+
+    override fun calculate(values: Map<String, String>): CalculatorResult {
+        val day = values["day"]?.toIntOrNull() ?: return invalidResult()
+        val month = values["month"]?.toIntOrNull() ?: return invalidResult()
+        val year = values["year"]?.toIntOrNull() ?: return invalidResult()
+
+        if (day !in 1..31 || month !in 1..12 || year < 1900 || year > 2100) {
+            return CalculatorResult("Invalid Date", "Please enter a valid calendar date.", "warning")
+        }
+
+        try {
+            val cal = java.util.Calendar.getInstance().apply {
+                isLenient = false
+                set(java.util.Calendar.YEAR, year)
+                set(java.util.Calendar.MONTH, month - 1)
+                set(java.util.Calendar.DAY_OF_MONTH, day)
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val lmpMillis = cal.timeInMillis
+            val currentMillis = System.currentTimeMillis()
+
+            if (lmpMillis > currentMillis) {
+                return CalculatorResult("Future Date", "LMP cannot be in the future.", "warning")
+            }
+
+            val diffMillis = currentMillis - lmpMillis
+            val diffDays = diffMillis / (1000 * 60 * 60 * 24)
+            val weeks = diffDays / 7
+            val remainingDays = diffDays % 7
+
+            if (weeks >= 45) {
+                return CalculatorResult("> 44 Weeks", "Gestational age exceeds standard pregnancy duration.", "warning")
+            }
+
+            val eddCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = lmpMillis
+                add(java.util.Calendar.DAY_OF_YEAR, 280)
+            }
+            val eddFormat = String.format("%02d/%02d/%04d", 
+                eddCal.get(java.util.Calendar.DAY_OF_MONTH),
+                eddCal.get(java.util.Calendar.MONTH) + 1,
+                eddCal.get(java.util.Calendar.YEAR)
+            )
+
+            val valueString = "$weeks Weeks, $remainingDays Days"
+            val interpretation = "Estimated Date of Delivery (EDD): $eddFormat\n(Based on Naegele's Rule: LMP + 280 Days)"
+
+            return CalculatorResult(
+                value = valueString,
+                interpretation = interpretation,
+                status = "normal"
+            )
+        } catch (e: Exception) {
+            return CalculatorResult("Invalid Date", "The specified date does not exist in the calendar.", "warning")
+        }
+    }
+}
+
+// 10. Growth Monitoring (0-5 Years)
+object GrowthMonitoringCalculator : Calculator() {
+    override val id = "growth"
+    override val name = "Child Growth Monitoring"
+    override val description = "Evaluates Weight-for-Age and Height-for-Age status in children under 5 using simplified WHO standards."
+    override val inputs = listOf(
+        InputField("age", "Age (Months, 0-60)", InputType.Number, "12"),
+        InputField("gender", "Gender", InputType.Choice(listOf("Boy", "Girl")), "Boy"),
+        InputField("weight", "Weight", InputType.Number, "9.5", "kg"),
+        InputField("height", "Height", InputType.Number, "75.0", "cm")
+    )
+
+    private val ages = doubleArrayOf(0.0, 3.0, 6.0, 9.0, 12.0, 18.0, 24.0, 36.0, 48.0, 60.0)
+    
+    private val boyWeights = doubleArrayOf(3.3, 6.4, 7.9, 8.9, 9.6, 10.9, 12.2, 14.3, 16.3, 18.3)
+    private val girlWeights = doubleArrayOf(3.2, 5.8, 7.3, 8.2, 8.9, 10.2, 11.5, 13.9, 16.1, 18.2)
+
+    private val boyHeights = doubleArrayOf(49.9, 61.4, 67.6, 72.0, 75.7, 82.3, 87.8, 96.1, 103.3, 110.0)
+    private val girlHeights = doubleArrayOf(49.1, 59.8, 65.7, 70.1, 74.0, 80.7, 86.4, 95.1, 102.7, 109.4)
+
+    private fun interpolate(age: Double, targetAges: DoubleArray, values: DoubleArray): Double {
+        if (age <= targetAges.first()) return values.first()
+        if (age >= targetAges.last()) return values.last()
+        for (i in 0 until targetAges.size - 1) {
+            if (age >= targetAges[i] && age <= targetAges[i + 1]) {
+                val ratio = (age - targetAges[i]) / (targetAges[i + 1] - targetAges[i])
+                return values[i] + ratio * (values[i + 1] - values[i])
+            }
+        }
+        return values.last()
+    }
+
+    override fun calculate(values: Map<String, String>): CalculatorResult {
+        val age = values["age"]?.toDoubleOrNull() ?: return invalidResult()
+        val gender = values["gender"] ?: "Boy"
+        val weight = values["weight"]?.toDoubleOrNull() ?: return invalidResult()
+        val height = values["height"]?.toDoubleOrNull() ?: return invalidResult()
+
+        if (age !in 0.0..60.0 || weight <= 0.0 || height <= 0.0) {
+            return CalculatorResult("N/A", "Please enter an age between 0 and 60 months, and positive weight/height.", "warning")
+        }
+
+        val isBoy = gender.lowercase() == "boy"
+        val medianWeight = interpolate(age, ages, if (isBoy) boyWeights else girlWeights)
+        val medianHeight = interpolate(age, ages, if (isBoy) boyHeights else girlHeights)
+
+        // Standard Deviation approximations
+        val weightSD = medianWeight * 0.12
+        val heightSD = medianHeight * 0.04
+
+        val waz = (weight - medianWeight) / weightSD
+        val haz = (height - medianHeight) / heightSD
+
+        val weightInterpretation = when {
+            waz < -3.0 -> "Severely Underweight (WAZ < -3)"
+            waz < -2.0 -> "Underweight (WAZ < -2)"
+            waz > 2.0 -> "Overweight (WAZ > +2)"
+            else -> "Normal Weight (WAZ: ${String.format("%.1f", waz)})"
+        }
+
+        val heightInterpretation = when {
+            haz < -3.0 -> "Severely Stunted (HAZ < -3)"
+            haz < -2.0 -> "Stunted (HAZ < -2)"
+            else -> "Normal Height (HAZ: ${String.format("%.1f", haz)})"
+        }
+
+        val overallStatus = if (waz < -2.0 || haz < -2.0 || waz > 2.0) "danger" else "normal"
+
+        return CalculatorResult(
+            value = String.format("WAZ: %.1f | HAZ: %.1f", waz, haz),
+            interpretation = "Weight Status: $weightInterpretation\nHeight Status: $heightInterpretation\n(Z-scores relative to WHO Growth Standards)",
+            status = overallStatus
         )
     }
 }
