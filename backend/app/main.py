@@ -3,20 +3,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from app.services.llm_provider import get_provider_info
 
-from .api.routes import chat, research, whatsapp, pdf_analyzer
+from .api.routes import research, pdf_analyzer
 
-# Load environment variables (API keys)
+# Load environment variables
 load_dotenv(override=True)
 
 app = FastAPI(
-    title="Medico AI Companion API",
-    description="Backend for the Hybrid RAG AI Medical Chat. Provider: OpenAI (primary) → Gemini (fallback).",
-    version="1.1.0"
+    title="Medico Feeds Backend API",
+    description="Dedicated guidelines and research summaries backend powered by Google Gemini 1.5/2.5 & Firestore.",
+    version="2.0.0"
 )
 
+# Enable CORS for local testing (Vite dev server and Android proxying)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],  # Open to mobile client network configurations
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,18 +25,16 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the Medico AI Companion Backend API!", "version": "1.1.0"}
+    return {"message": "Welcome to the Medico Feeds Backend API!", "version": "2.0.0"}
 
 @app.get("/api/health")
 def health_check():
-    """Returns current LLM provider status for observability and debugging."""
+    """Returns current LLM status for diagnostics."""
     return {
         "status": "ok",
-        "backend": "Medico AI Companion",
+        "backend": "Medico Feeds",
         **get_provider_info()
     }
 
-app.include_router(chat.router,      prefix="/api",            tags=["chat"])
 app.include_router(research.router,  prefix="/api",            tags=["research"])
 app.include_router(pdf_analyzer.router, prefix="/api",         tags=["research"])
-app.include_router(whatsapp.router,  prefix="/api/whatsapp",   tags=["whatsapp"])

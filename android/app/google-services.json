@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "643391458781",
+    "project_id": "medguide-companion-9912",
+    "storage_bucket": "medguide-companion-9912.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:643391458781:android:a28547a3fd7d4a5fd37a34",
+        "android_client_info": {
+          "package_name": "com.example.medicofeeds"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDLYkknOe8dZ4AYiXyXL7mZz9FEVIGQNaE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

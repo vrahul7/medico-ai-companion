@@ -24,9 +24,6 @@ from pypdf import PdfReader
 from dotenv import load_dotenv
 
 from app.services.llm_provider import (
-    get_openai_client,
-    ACTIVE_PROVIDER,
-    PROVIDER_OPENAI,
     GEMINI_API_KEY,
 )
 
@@ -120,48 +117,18 @@ async def analyze_pdf(req: PdfAnalysisRequest):
 
     prompt = _build_prompt(full_text, req.source_type)
 
-    # ── 3a. Try OpenAI gpt-4o (primary) ──────────────────────────────────────
-    if ACTIVE_PROVIDER == PROVIDER_OPENAI:
-        openai_client = get_openai_client()
-        if openai_client:
-            try:
-                completion = openai_client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a clinical AI assistant helping physicians quickly "
-                                "understand medical documents. Be precise, evidence-based, and concise."
-                            )
-                        },
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.2,
-                    max_tokens=1024,
-                )
-                analysis_markdown = completion.choices[0].message.content.strip()
-                logger.info("[PDFAnalyzer] Analysis complete via OpenAI gpt-4o")
-                return PdfAnalysisResponse(
-                    analysis_markdown=analysis_markdown,
-                    pdf_url=req.url,
-                    provider_used="openai/gpt-4o"
-                )
-            except Exception as e:
-                logger.warning(f"[PDFAnalyzer] OpenAI analysis failed, falling back to Gemini: {e}")
-
-    # ── 3b. Fallback to Gemini ────────────────────────────────────────────────
+    # ── 3. Run Gemini Analysis ────────────────────────────────────────────────
     try:
         response = _gemini.generate_content(prompt)
         analysis_markdown = response.text.strip()
-        logger.info("[PDFAnalyzer] Analysis complete via Gemini gemini-1.5-flash (fallback)")
+        logger.info("[PDFAnalyzer] Analysis complete via Gemini gemini-1.5-flash")
         return PdfAnalysisResponse(
             analysis_markdown=analysis_markdown,
             pdf_url=req.url,
             provider_used="google/gemini-1.5-flash"
         )
     except Exception as e:
-        logger.error(f"[PDFAnalyzer] All AI providers failed: {e}")
+        logger.error(f"[PDFAnalyzer] Gemini AI analysis failed: {e}")
         raise HTTPException(
             status_code=500,
             detail="AI analysis engine is currently unavailable. Please try again later."

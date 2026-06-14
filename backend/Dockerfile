@@ -1,4 +1,4 @@
-# Backend Dockerfile for Medico AI
+# Backend Dockerfile for Medico Feeds API
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -12,10 +12,7 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install gunicorn
-
-# Download Presidio models (optional, can be done at runtime)
-RUN python -m spacy download en_core_web_lg
+RUN pip install gunicorn uvicorn
 
 # Copy application code
 COPY . .
