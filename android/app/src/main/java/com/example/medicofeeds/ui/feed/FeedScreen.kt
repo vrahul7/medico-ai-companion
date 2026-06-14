@@ -207,12 +207,12 @@ fun FeedCard(
             .background(
                 brush = androidx.compose.ui.graphics.Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF1E293B).copy(alpha = 0.85f),
-                        Color(0xFF0F172A).copy(alpha = 0.95f)
+                        CardBg.copy(alpha = 0.85f),
+                        DarkCanvas.copy(alpha = 0.95f)
                     )
                 )
             )
-            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(24.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
             .padding(24.dp)
     ) {
         Column(
