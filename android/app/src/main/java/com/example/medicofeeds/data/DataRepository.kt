@@ -2,7 +2,10 @@ package com.example.medicofeeds.data
 
 import android.util.Log
 import com.example.medicofeeds.data.api.RetrofitClient
+import com.example.medicofeeds.data.model.BookmarkTag
+import com.example.medicofeeds.data.model.BookmarkedItem
 import com.example.medicofeeds.data.model.FeedItem
+import com.example.medicofeeds.data.model.BookmarkTagUpdateRequest
 import com.google.firebase.auth.FirebaseAuth
 import java.io.IOException
 
@@ -10,9 +13,14 @@ interface DataRepository {
     suspend fun getScholarlyFeed(page: Int, topic: String, userId: String?): List<FeedItem>
     suspend fun getGuidelinesFeed(page: Int, userId: String?): List<FeedItem>
     suspend fun markAsRead(userId: String, itemId: String)
-    suspend fun toggleBookmark(userId: String, item: FeedItem, bookmarked: Boolean)
+    suspend fun toggleBookmark(userId: String, item: FeedItem, bookmarked: Boolean, tags: Set<BookmarkTag> = emptySet(), customTag: String? = null)
     suspend fun getBookmarks(userId: String): List<String>
-    suspend fun getBookmarkedArticles(): List<FeedItem>
+    suspend fun getBookmarkedArticles(): List<BookmarkedItem>
+    suspend fun getBookmarkedArticlesByTag(tag: BookmarkTag): List<BookmarkedItem>
+    suspend fun updateBookmarkTags(userId: String, itemId: String, tags: Set<BookmarkTag>, customTag: String? = null)
+    suspend fun registerDeviceToken(userId: String, fcmToken: String)
+    suspend fun getAlertPreferences(userId: String): Map<String, Boolean>
+    suspend fun updateAlertPreferences(userId: String, preferences: Map<String, Boolean>)
 }
 
 class DefaultDataRepository(private val context: android.content.Context) : DataRepository {
@@ -20,23 +28,69 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
     private val sharedPrefs = context.getSharedPreferences("medguide_bookmarks", android.content.Context.MODE_PRIVATE)
     private val itemCache = java.util.concurrent.ConcurrentHashMap<String, FeedItem>()
 
-    private fun getLocalBookmarksMap(): MutableMap<String, FeedItem> {
-        val json = sharedPrefs.getString("bookmarks_map", null) ?: return mutableMapOf()
+    // ── BookmarkedItem local storage (with tags) ──
+
+    private fun getLocalBookmarkedItems(): MutableMap<String, BookmarkedItem> {
+        val json = sharedPrefs.getString("bookmarked_items_v2", null) ?: run {
+            // Migrate from old format if exists
+            return migrateOldBookmarks()
+        }
         return try {
-            val type = object : com.google.gson.reflect.TypeToken<MutableMap<String, FeedItem>>() {}.type
+            val type = object : com.google.gson.reflect.TypeToken<MutableMap<String, BookmarkedItem>>() {}.type
             gson.fromJson(json, type) ?: mutableMapOf()
         } catch (e: Exception) {
             mutableMapOf()
         }
     }
 
-    private fun saveLocalBookmarksMap(map: Map<String, FeedItem>) {
-        val json = gson.toJson(map)
-        sharedPrefs.edit().putString("bookmarks_map", json).apply()
+    private fun migrateOldBookmarks(): MutableMap<String, BookmarkedItem> {
+        val oldJson = sharedPrefs.getString("bookmarks_map", null) ?: return mutableMapOf()
+        return try {
+            val type = object : com.google.gson.reflect.TypeToken<MutableMap<String, FeedItem>>() {}.type
+            val oldMap: MutableMap<String, FeedItem> = gson.fromJson(oldJson, type) ?: return mutableMapOf()
+            val newMap = mutableMapOf<String, BookmarkedItem>()
+            for ((id, item) in oldMap) {
+                newMap[id] = BookmarkedItem(item = item, tags = emptySet(), bookmarkedAt = System.currentTimeMillis())
+            }
+            saveLocalBookmarkedItems(newMap)
+            newMap
+        } catch (e: Exception) {
+            mutableMapOf()
+        }
     }
 
-    override suspend fun getBookmarkedArticles(): List<FeedItem> {
-        return getLocalBookmarksMap().values.toList()
+    private fun saveLocalBookmarkedItems(map: Map<String, BookmarkedItem>) {
+        val json = gson.toJson(map)
+        sharedPrefs.edit().putString("bookmarked_items_v2", json).apply()
+    }
+
+    override suspend fun getBookmarkedArticles(): List<BookmarkedItem> {
+        return getLocalBookmarkedItems().values.toList().sortedByDescending { it.bookmarkedAt }
+    }
+
+    override suspend fun getBookmarkedArticlesByTag(tag: BookmarkTag): List<BookmarkedItem> {
+        return getLocalBookmarkedItems().values
+            .filter { it.tags.contains(tag) }
+            .sortedByDescending { it.bookmarkedAt }
+    }
+
+    override suspend fun updateBookmarkTags(userId: String, itemId: String, tags: Set<BookmarkTag>, customTag: String?) {
+        val items = getLocalBookmarkedItems()
+        val existing = items[itemId] ?: return
+        items[itemId] = existing.copy(tags = tags, customTag = customTag)
+        saveLocalBookmarkedItems(items)
+
+        try {
+            RetrofitClient.apiService.updateBookmarkTags(
+                BookmarkTagUpdateRequest(
+                    user_id = userId,
+                    item_id = itemId,
+                    tags = tags.map { it.name } + (if (customTag != null) listOf("CUSTOM:$customTag") else emptyList())
+                )
+            )
+        } catch (e: Exception) {
+            // Fail silently — local storage is authoritative
+        }
     }
 
     override suspend fun getScholarlyFeed(page: Int, topic: String, userId: String?): List<FeedItem> {
@@ -49,6 +103,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                     source = it.journal ?: "Medical Reference",
                     dateOrYear = it.year ?: "Recent",
                     summary = it.summary ?: "No AI clinical summary available.",
+                    clinicalDigest = it.clinical_digest ?: extractFallbackDigest(it.summary ?: it.title ?: ""),
                     fullTextUrl = it.pubmed_url ?: "https://pubmed.ncbi.nlm.nih.gov/",
                     pdfUrl = it.pdf_url,
                     isGuideline = false
@@ -74,6 +129,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                     source = it.source ?: "Medical Health Authority",
                     dateOrYear = it.published ?: "Recent",
                     summary = it.summary ?: "No AI clinical summary available.",
+                    clinicalDigest = it.clinical_digest ?: extractFallbackDigest(it.summary ?: it.title ?: ""),
                     fullTextUrl = it.link ?: "https://www.who.int/",
                     pdfUrl = it.pdf_url,
                     isGuideline = true
@@ -89,6 +145,17 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
         }
     }
 
+    /** Extracts a concise 2-sentence fallback digest when the backend doesn't provide one */
+    private fun extractFallbackDigest(text: String): String {
+        if (text.isBlank()) return "Clinical significance details pending AI analysis."
+        val sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.length > 10 }
+        return if (sentences.size >= 2) {
+            "${sentences[0].trim()} ${sentences[1].trim()}"
+        } else {
+            sentences.firstOrNull()?.trim() ?: text.take(150).trim()
+        }
+    }
+
     override suspend fun markAsRead(userId: String, itemId: String) {
         try {
             RetrofitClient.apiService.markAsRead(com.example.medicofeeds.data.model.ReadRequest(userId, itemId))
@@ -97,17 +164,25 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
         }
     }
 
-    override suspend fun toggleBookmark(userId: String, item: FeedItem, bookmarked: Boolean) {
+    override suspend fun toggleBookmark(userId: String, item: FeedItem, bookmarked: Boolean, tags: Set<BookmarkTag>, customTag: String?) {
         try {
-            val bookmarksMap = getLocalBookmarksMap()
+            val bookmarkedItems = getLocalBookmarkedItems()
             if (bookmarked) {
-                bookmarksMap[item.id] = item
+                bookmarkedItems[item.id] = BookmarkedItem(
+                    item = item,
+                    tags = tags,
+                    customTag = customTag,
+                    bookmarkedAt = System.currentTimeMillis()
+                )
             } else {
-                bookmarksMap.remove(item.id)
+                bookmarkedItems.remove(item.id)
             }
-            saveLocalBookmarksMap(bookmarksMap)
-            
-            RetrofitClient.apiService.toggleBookmark(com.example.medicofeeds.data.model.BookmarkRequest(userId, item.id, bookmarked))
+            saveLocalBookmarkedItems(bookmarkedItems)
+
+            val tagStrings = tags.map { it.name } + (if (customTag != null) listOf("CUSTOM:$customTag") else emptyList())
+            RetrofitClient.apiService.toggleBookmark(
+                com.example.medicofeeds.data.model.BookmarkRequest(userId, item.id, bookmarked, tagStrings)
+            )
         } catch (e: Exception) {
             // Fail silently in offline mode
         }
@@ -117,7 +192,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
         return try {
             RetrofitClient.apiService.getBookmarks(userId).bookmarked_ids
         } catch (e: Exception) {
-            getLocalBookmarksMap().keys.toList()
+            getLocalBookmarkedItems().keys.toList()
         }
     }
 
@@ -134,6 +209,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                 source = "American Academy of Pediatrics (AAP)",
                 dateOrYear = "2025",
                 summary = "Recommends early pharmacological treatment and intensive health behavior lifestyle treatment (IHBLT) for pediatric obesity. Treatment decisions should start at age 6 with comprehensive family-based therapies, and pharmacotherapy should be considered for adolescents aged 12 and older.",
+                clinicalDigest = "⚡ Start obesity pharmacotherapy at age 12+. IHBLT begins at age 6 with family-based approach.",
                 fullTextUrl = "https://publications.aap.org/pediatrics",
                 pdfUrl = "https://publications.aap.org/pediatrics",
                 isGuideline = true
@@ -144,6 +220,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                 source = "KDIGO (Kidney Disease: Improving Global Outcomes)",
                 dateOrYear = "2024",
                 summary = "Integrates GFR and albuminuria stages for CKD progression risk assessment. Recommends SGLT2 inhibitors as first-line therapy for adults with CKD and heart failure or type 2 diabetes with eGFR >= 20 mL/min/1.73m2. Suggests RAS inhibitors at maximum tolerated doses for hypertension and severely increased albuminuria.",
+                clinicalDigest = "⚡ SGLT2i first-line for CKD + HF/T2DM when eGFR ≥20. Maximize RAS inhibitor dose for albuminuria.",
                 fullTextUrl = "https://kdigo.org/guidelines",
                 pdfUrl = "https://kdigo.org/guidelines",
                 isGuideline = true
@@ -154,6 +231,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                 source = "EULAR (European Alliance of Associations for Rheumatology)",
                 dateOrYear = "2024",
                 summary = "Recommends methotrexate as the first-line anchor drug therapy. Short-term glucocorticoids should be considered when initiating or changing conventional synthetic DMARDs, but must be tapered rapidly. If treatment target is not met, a biologic DMARD or JAK inhibitor should be added.",
+                clinicalDigest = "⚡ MTX remains first-line for RA. Add biologic/JAKi if target not met; taper steroids rapidly.",
                 fullTextUrl = "https://www.eular.org",
                 pdfUrl = "https://www.eular.org",
                 isGuideline = true
@@ -164,6 +242,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                 source = "World Health Organization (WHO)",
                 dateOrYear = "2025",
                 summary = "Strongly recommends intravenous artesunate as the preferred first-line treatment for adults and children with severe malaria. Pre-referral treatment with rectal artesunate is recommended for children under 6 years. Emphasizes blood glucose monitoring to prevent hypoglycemia.",
+                clinicalDigest = "⚡ IV artesunate is first-line for severe malaria. Rectal artesunate for pre-referral in children <6y.",
                 fullTextUrl = "https://www.who.int",
                 pdfUrl = "https://www.who.int",
                 isGuideline = true
@@ -174,6 +253,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                 source = "ACOG (American College of Obstetricians and Gynecologists)",
                 dateOrYear = "2024",
                 summary = "Recommends low-dose aspirin (81 mg/day) initiation between 12 and 28 weeks of gestation for pregnant individuals at high risk of preeclampsia. Emphasizes delivery at 37 0/7 weeks for gestational hypertension or preeclampsia without severe features, and 34 0/7 weeks with severe features.",
+                clinicalDigest = "⚡ Low-dose ASA 81mg from 12–28 wk for high-risk preeclampsia. Deliver at 37wk (mild) or 34wk (severe).",
                 fullTextUrl = "https://www.acog.org",
                 pdfUrl = "https://www.acog.org",
                 isGuideline = true
@@ -191,6 +271,7 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                     source = "New England Journal of Medicine",
                     dateOrYear = "2024",
                     summary = "Phase 3 trial demonstrates that maternal immunization with RSVpreF vaccine significantly reduces the incidence of medically attended severe RSV-associated lower respiratory tract illness in infants through 150 days of life, with no safety signals identified.",
+                    clinicalDigest = "⚡ Maternal RSVpreF vaccine reduces severe infant RSV illness through 150 days. No safety concerns found.",
                     fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
                     isGuideline = false
                 ),
@@ -200,111 +281,59 @@ class DefaultDataRepository(private val context: android.content.Context) : Data
                     source = "The Lancet",
                     dateOrYear = "2024",
                     summary = "Follow-up of the LEAP cohort confirms that early introduction of peanut products in infants with severe eczema or egg allergy leads to an 81% reduction in peanut allergy prevalence at age 5 compared to avoidance.",
+                    clinicalDigest = "⚡ Early peanut introduction in high-risk infants reduces peanut allergy by 81% at age 5.",
                     fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
                     isGuideline = false
                 )
             )
-            "radiology" -> listOf(
+            else -> listOf(
                 FeedItem(
-                    id = "mock_sch_rad_1",
-                    title = "Deep Learning AI System vs. Board-Certified Radiologists in Mammography Screening",
-                    source = "Radiology",
+                    id = "mock_sch_gen_1",
+                    title = "Advances in Clinical Medicine: A Comprehensive Review",
+                    source = "The Lancet",
                     dateOrYear = "2024",
-                    summary = "Retrospective reader study shows that a deep learning algorithm achieved non-inferior sensitivity and superior specificity compared to board-certified breast radiologists for screening mammograms, significantly reducing false positive recall rates.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                ),
-                FeedItem(
-                    id = "mock_sch_rad_2",
-                    title = "Low-Dose CT Screening for Lung Cancer: 10-Year Outcomes from the NELSON Trial",
-                    source = "Journal of Clinical Oncology",
-                    dateOrYear = "2023",
-                    summary = "Long-term analysis confirms that volume CT lung screening in high-risk asymptomatic smokers reduces lung cancer mortality by 24% in men and 33% in women at 10 years, with a high positive predictive value for nodule detection.",
+                    summary = "Review of recent clinical advances across multiple disciplines.",
+                    clinicalDigest = "⚡ Multi-discipline clinical advances review covering latest evidence-based practice updates.",
                     fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
                     isGuideline = false
                 )
             )
-            "dermatology" -> listOf(
-                FeedItem(
-                    id = "mock_sch_der_1",
-                    title = "Efficacy of Oral JAK Inhibitors in Moderate-to-Severe Alopecia Areata: Phase 3 Trial Results",
-                    source = "Journal of the American Academy of Dermatology",
-                    dateOrYear = "2024",
-                    summary = "Phase 3 clinical trial of baricitinib shows that a significantly higher proportion of patients achieved at least 80% scalp hair coverage at 36 weeks compared to placebo. Mild acne and headache were the most common adverse events.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                ),
-                FeedItem(
-                    id = "mock_sch_der_2",
-                    title = "Dupilumab for Atopic Dermatitis in Pediatric Patients Aged 6 Months to 5 Years",
-                    source = "JAMA Dermatology",
-                    dateOrYear = "2024",
-                    summary = "Randomized, double-blind study shows that dupilumab combined with low-potency topical corticosteroids significantly improved skin clearance and reduced itch severity in young children with moderate-to-severe atopic dermatitis, showing a favorable safety profile.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                )
+        }
+    }
+
+    override suspend fun registerDeviceToken(userId: String, fcmToken: String) {
+        try {
+            RetrofitClient.apiService.registerDeviceToken(
+                com.example.medicofeeds.data.model.DeviceTokenRequest(userId, fcmToken)
             )
-            "orthopedics" -> listOf(
-                FeedItem(
-                    id = "mock_sch_ort_1",
-                    title = "Platelet-Rich Plasma vs. Intra-articular Corticosteroids for Mild-to-Moderate Knee Osteoarthritis",
-                    source = "The American Journal of Sports Medicine",
-                    dateOrYear = "2024",
-                    summary = "A double-blind randomized controlled trial shows that intra-articular PRP injections achieved significantly better improvements in WOMAC pain scores and physical function at 12 months compared to corticosteroid injections.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                ),
-                FeedItem(
-                    id = "mock_sch_ort_2",
-                    title = "Clinical Outcomes of Robotic-Assisted vs. Manual Total Knee Arthroplasty: A Systematic Review",
-                    source = "Journal of Bone and Joint Surgery",
-                    dateOrYear = "2023",
-                    summary = "Meta-analysis of 1,200 patients shows that robotic-assisted total knee arthroplasty results in significantly more precise component positioning and fewer outlier alignments compared to manual techniques, though long-term functional scores were similar.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                )
+        } catch (e: Exception) {
+            Log.e("DefaultDataRepository", "Failed to register FCM token with backend: ${e.message}")
+        }
+    }
+
+    override suspend fun getAlertPreferences(userId: String): Map<String, Boolean> {
+        return try {
+            RetrofitClient.apiService.getAlertPreferences(userId).sources
+        } catch (e: Exception) {
+            Log.e("DefaultDataRepository", "Failed to get alert preferences: ${e.message}")
+            mapOf(
+                "WHO SEARO" to true,
+                "DOHFW" to true,
+                "DGHS" to true,
+                "AAP" to true,
+                "KDIGO" to true,
+                "ACOG" to true
             )
-            "obgyn" -> listOf(
-                FeedItem(
-                    id = "mock_sch_ob_1",
-                    title = "Intrapartum Uterine Activity and Neonatal Acid-Base Balance: A Prospective Cohort Study",
-                    source = "Obstetrics & Gynecology",
-                    dateOrYear = "2024",
-                    summary = "Cohort study of 500 nulliparous women shows that a high frequency of contractions (tachysystole) in the second stage of labor is strongly correlated with a decrease in umbilical artery pH, highlighting the need for active titration of oxytocin.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                ),
-                FeedItem(
-                    id = "mock_sch_ob_2",
-                    title = "Progesterone for the Prevention of Preterm Birth in Twin Gestations with Short Cervix",
-                    source = "American Journal of Obstetrics and Gynecology",
-                    dateOrYear = "2024",
-                    summary = "Individual participant data meta-analysis confirms that vaginal progesterone administration in asymptomatic twin gestations with a mid-trimester cervical length <= 25 mm significantly reduces the risk of preterm birth before 33 weeks.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                )
+        }
+    }
+
+    override suspend fun updateAlertPreferences(userId: String, preferences: Map<String, Boolean>) {
+        try {
+            RetrofitClient.apiService.updateAlertPreferences(
+                com.example.medicofeeds.data.model.AlertPreferences(userId, preferences)
             )
-            "anesthesia" -> listOf(
-                FeedItem(
-                    id = "mock_sch_ane_1",
-                    title = "Target-Controlled Infusion vs. Manual Infusion of Propofol in Pediatric Anesthesia",
-                    source = "Anesthesia & Analgesia",
-                    dateOrYear = "2024",
-                    summary = "Randomized study of 200 pediatric patients indicates that target-controlled infusion of propofol provides significantly more stable hemodynamics and a faster emergence profile compared to manual titration schemes.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                ),
-                FeedItem(
-                    id = "mock_sch_ane_2",
-                    title = "Postoperative Nausea and Vomiting: Efficacy of Combined 5-HT3 and NK1 Receptor Antagonists",
-                    source = "British Journal of Anaesthesia",
-                    dateOrYear = "2024",
-                    summary = "Phase 4 trial demonstrates that dual prophylaxis with ondansetron and aprepitant provides superior prevention of postoperative nausea and vomiting compared to single-agent therapy in patients undergoing high-risk laparoscopic surgeries.",
-                    fullTextUrl = "https://pubmed.ncbi.nlm.nih.gov/",
-                    isGuideline = false
-                )
-            )
-            else -> emptyList()
+        } catch (e: Exception) {
+            Log.e("DefaultDataRepository", "Failed to update alert preferences: ${e.message}")
         }
     }
 }

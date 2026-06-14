@@ -38,8 +38,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.example.medicofeeds.data.model.FeedItem
+import com.example.medicofeeds.data.model.BookmarkTag
 import com.example.medicofeeds.theme.*
 import android.webkit.WebView
+import androidx.compose.foundation.BorderStroke
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
 import androidx.compose.ui.viewinterop.AndroidView
@@ -55,6 +57,7 @@ fun FeedScreen(
     val firebaseAnalytics = remember { FirebaseAnalytics.getInstance(context) }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val bookmarkedIds by viewModel.bookmarkedIds.collectAsStateWithLifecycle()
+    val pendingBookmarkItem by viewModel.pendingBookmarkItem.collectAsStateWithLifecycle()
 
     var activeViewUrl by remember { mutableStateOf<String?>(null) }
 
@@ -196,6 +199,17 @@ fun FeedScreen(
             onDismiss = { activeViewUrl = null }
         )
     }
+
+    // Show bookmark tag selection bottom sheet
+    pendingBookmarkItem?.let { item ->
+        BookmarkTagSheet(
+            item = item,
+            onDismiss = { viewModel.dismissBookmarkSheet() },
+            onConfirm = { tags, customTag ->
+                viewModel.confirmBookmarkWithTags(item, tags, customTag)
+            }
+        )
+    }
 }
 
 @Composable
@@ -289,6 +303,37 @@ fun FeedCard(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Gold-bordered Clinical Takeaway Box
+            if (!item.clinicalDigest.isNullOrEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFFFD700).copy(alpha = 0.08f))
+                        .border(1.dp, Color(0xFFFFD700).copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "⚡ CLINICAL TAKEAWAY",
+                            color = Color(0xFFFFD700),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = item.clinicalDigest,
+                            color = TextWhite,
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
 
             // Scrollable AI Summary Block
             Column(
@@ -559,4 +604,154 @@ fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier = composed {
         indication = null,
         onClick = onClick
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun BookmarkTagSheet(
+    item: FeedItem,
+    onDismiss: () -> Unit,
+    onConfirm: (Set<BookmarkTag>, String?) -> Unit
+) {
+    var selectedTags by remember { mutableStateOf(emptySet<BookmarkTag>()) }
+    var customTagText by remember { mutableStateOf("") }
+    val showCustomField = selectedTags.contains(BookmarkTag.CUSTOM)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = CardBg,
+        contentColor = TextWhite,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = Color.White.copy(alpha = 0.2f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 24.dp, vertical = 16.dp)
+        ) {
+            Text(
+                text = "📌 Categorize Bookmark",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = SlatePrimary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Select tags to organize this guideline/article for quick reference.",
+                fontSize = 13.sp,
+                color = TextMuted
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Scrollable tag grid
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Layout tags as flow of chips
+                val tags = BookmarkTag.entries
+                val rows = tags.chunked(3)
+                rows.forEach { row ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        row.forEach { tag ->
+                            val isSelected = selectedTags.contains(tag)
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) Color(tag.colorHex).copy(alpha = 0.15f) else Color.White.copy(alpha = 0.03f))
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) Color(tag.colorHex) else Color.White.copy(alpha = 0.1f),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable {
+                                        selectedTags = if (isSelected) {
+                                            selectedTags - tag
+                                        } else {
+                                            selectedTags + tag
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = tag.displayName,
+                                    color = if (isSelected) Color(tag.colorHex) else TextWhite.copy(alpha = 0.8f),
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                        // Fill empty slots in row
+                        if (row.size < 3) {
+                            repeat(3 - row.size) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (showCustomField) {
+                Spacer(modifier = Modifier.height(16.dp))
+                OutlinedTextField(
+                    value = customTagText,
+                    onValueChange = { customTagText = it },
+                    label = { Text("Custom Tag Name", color = TextMuted) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = SlatePrimary,
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
+                        focusedLabelColor = SlatePrimary,
+                        unfocusedLabelColor = TextMuted,
+                        focusedTextColor = TextWhite,
+                        unfocusedTextColor = TextWhite,
+                        cursorColor = SlatePrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Action Buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextWhite),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Skip Tags", fontSize = 14.sp)
+                }
+
+                Button(
+                    onClick = {
+                        onConfirm(
+                            selectedTags,
+                            if (showCustomField && customTagText.isNotBlank()) customTagText.trim() else null
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SlatePrimary),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Save Bookmark", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
 }

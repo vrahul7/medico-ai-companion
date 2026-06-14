@@ -26,6 +26,7 @@ class RSSItem(BaseModel):
     summary: str
     source: str
     pdf_url: str | None = None
+    clinical_digest: str | None = None
 
 def fetch_rss_guidelines(page: int = 1, limit_per_feed: int = 5) -> List[RSSItem]:
     global _CACHE

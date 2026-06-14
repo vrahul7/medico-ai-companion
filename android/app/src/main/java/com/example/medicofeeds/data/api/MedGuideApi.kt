@@ -39,4 +39,28 @@ interface MedGuideApi {
     suspend fun getBookmarks(
         @Query("user_id") userId: String
     ): BookmarksResponse
+
+    // ── Smart Bookmark Tags ──
+
+    @POST("api/research/bookmark/tags")
+    suspend fun updateBookmarkTags(
+        @Body request: BookmarkTagUpdateRequest
+    ): FeedbackResponse
+
+    // ── Breaking Guideline Alerts ──
+
+    @POST("api/alerts/register-device")
+    suspend fun registerDeviceToken(
+        @Body request: DeviceTokenRequest
+    ): FeedbackResponse
+
+    @GET("api/alerts/preferences")
+    suspend fun getAlertPreferences(
+        @Query("user_id") userId: String
+    ): AlertPreferences
+
+    @POST("api/alerts/preferences")
+    suspend fun updateAlertPreferences(
+        @Body request: AlertPreferences
+    ): FeedbackResponse
 }

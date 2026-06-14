@@ -5,6 +5,9 @@ Exposes feeds for:
   1. GET /api/research/scholarly : PubMed articles + AI summaries
   2. GET /api/research/guidelines: Curated RSS guidelines + AI summaries
   3. POST /api/research/feedback : Record thumbs up/down feedback on summaries
+  4. POST /api/research/bookmark : Bookmark with optional tags
+  5. POST /api/research/bookmark/tags : Update tags on existing bookmark
+  6. GET  /api/research/bookmarks : Retrieve bookmarks (optional tag filter)
 
 Summary provider: Google Gemini 1.5/2.5
 Database: Cloud Firestore caching
@@ -14,6 +17,7 @@ import os
 import time
 import logging
 import re
+import json
 from typing import List
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
@@ -30,7 +34,9 @@ from app.services.firebase_client import (
     mark_feed_as_read,
     get_read_feed_ids,
     toggle_bookmark,
-    get_bookmarked_feed_ids
+    get_bookmarked_feed_ids,
+    update_bookmark_tags,
+    get_bookmarks_with_tags
 )
 from app.services.rss_fetcher import fetch_rss_guidelines, RSSItem
 
@@ -47,7 +53,7 @@ Entrez.api_key = os.getenv("NCBI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", ""))
 _gemma = genai.GenerativeModel(
     model_name="gemma-4-31b-it",
-    generation_config={"temperature": 0.1, "max_output_tokens": 250}
+    generation_config={"temperature": 0.1, "max_output_tokens": 350}
 )
 
 class ResearchArticle(BaseModel):
@@ -60,6 +66,7 @@ class ResearchArticle(BaseModel):
     abstract: str
     pubmed_url: str
     pdf_url: str | None = None
+    clinical_digest: str | None = None
 
 class ScholarlyFeedResponse(BaseModel):
     articles: List[ResearchArticle]
@@ -103,6 +110,38 @@ TOPIC_QUERIES = {
 PAGE_SIZE = 5
 
 
+def _extract_first_two_sentences(text: str) -> str:
+    """Extracts the first 2 sentences from text as a fallback clinical digest."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    digest = " ".join(sentences[:2]).strip()
+    return digest if digest else text[:200]
+
+
+def parse_json_summary(text: str) -> dict:
+    text_stripped = text.strip()
+    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text_stripped, re.DOTALL)
+    if match:
+        json_str = match.group(1)
+    else:
+        json_str = text_stripped
+    try:
+        data = json.loads(json_str)
+        if "summary" in data or "clinical_digest" in data:
+            return {
+                "summary": data.get("summary", ""),
+                "clinical_digest": data.get("clinical_digest", "")
+            }
+    except Exception:
+        pass
+    
+    sentences = re.split(r'(?<=[.!?])\s+', text_stripped)
+    digest = " ".join(sentences[:2]) if len(sentences) > 0 else text_stripped
+    return {
+        "summary": text_stripped,
+        "clinical_digest": digest
+    }
+
+
 @router.get("/research/scholarly", response_model=ScholarlyFeedResponse)
 def get_scholarly_feed(
     page: int = Query(default=1, ge=1),
@@ -134,14 +173,15 @@ def get_scholarly_feed(
             try:
                 title = item.get("title", "Untitled Article")
                 abstract = item.get("abstract", "")
-                summary = _generate_summary(title, abstract)
+                res = _generate_summary(title, abstract)
                 return ResearchArticle(
                     pmid=item.get("pmid", "0"),
                     title=title,
                     journal=item.get("journal", "Clinical Journal"),
                     year=item.get("year", "2024"),
                     authors=item.get("authors", "Et al."),
-                    summary=summary,
+                    summary=res.get("summary", ""),
+                    clinical_digest=res.get("clinical_digest", ""),
                     abstract=abstract,
                     pubmed_url=item.get("pubmed_url", ""),
                     pdf_url=item.get("pdf_url")
@@ -203,8 +243,9 @@ def get_guidelines_feed(
                 else:
                     item_data = f"Title: {item.title}. Details: {item.summary}"
                 
-                ai_summary = _generate_summary("Medical Guideline", item_data)
-                item.summary = ai_summary
+                res = _generate_summary("Medical Guideline", item_data)
+                item.summary = res.get("summary", "")
+                item.clinical_digest = res.get("clinical_digest", "")
                 return item
             except Exception as e:
                 logger.error(f"Error processing guideline summary: {e}")
@@ -241,7 +282,7 @@ VERTEX_ENDPOINT_ID = os.getenv("VERTEX_ENDPOINT_ID")
 MEDGEMMA_API_URL = os.getenv("MEDGEMMA_API_URL")
 
 def get_gcp_credentials():
-    import json
+    import json as _json
     from google.oauth2.credentials import Credentials
     from google.oauth2 import service_account
     
@@ -253,7 +294,7 @@ def get_gcp_credentials():
     if os.path.exists(firebase_tools_path):
         try:
             with open(firebase_tools_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+                data = _json.load(f)
             tokens = data.get("tokens", {})
             access_token = tokens.get("access_token")
             if access_token:
@@ -263,24 +304,38 @@ def get_gcp_credentials():
             
     return None
 
-def _generate_summary(title: str, abstract: str) -> str:
-    """Generates a 2-3 sentence clinical summary using Google Gemma (caching in Firestore)."""
+def _generate_summary(title: str, abstract: str) -> dict:
+    """Generates a clinical summary and a 2-line clinical digest using Google Gemma/Gemini (caching in Firestore)."""
     clean_abstract = re.sub(r'<[^>]+>', '', abstract)
     content_hash = hashlib.sha256(f"{title}:{clean_abstract}".encode('utf-8')).hexdigest()
     
     # Check Firestore cache first
     cached = get_cached_summary(content_hash)
     if cached:
-        return cached
+        summary_text = cached.get("summary_text") or ""
+        clinical_digest = cached.get("clinical_digest")
+        if not clinical_digest:
+            sentences = re.split(r'(?<=[.!?])\s+', summary_text)
+            clinical_digest = " ".join(sentences[:2]) if len(sentences) > 0 else summary_text
+        return {
+            "summary": summary_text,
+            "clinical_digest": clinical_digest
+        }
 
     prompt = (
-        f"You are a clinical AI assistant. Summarize this clinical paper/guideline in about 200 words (maximum 200 words). The summary must be crisp, precise, and highly readable for a busy physician.\n"
-        f"Format requirements:\n"
-        f"1. Start writing the summary immediately. Do not include any introductory remarks, metadata, thinking process, markdown bolding, or bullet points.\n"
-        f"2. Focus only on critical thresholds, patient criteria, and clinical findings.\n"
+        f"You are a clinical AI assistant. Analyze this clinical paper/guideline and return a JSON object with two fields:\n"
+        f"1. 'summary': A crisp, precise, and highly readable clinical summary in about 150-200 words for a busy physician. Focus only on critical thresholds, patient criteria, and clinical findings. Do not include markdown bolding, bullet points, introductory remarks, metadata, or thinking process.\n"
+        f"2. 'clinical_digest': A 2-line actionable clinical takeaway (maximum 2 sentences) summarizing the key bottom-line message.\n\n"
+        f"Your response MUST be valid JSON matching this schema:\n"
+        f"{{\n"
+        f"  \"summary\": \"...\",\n"
+        f"  \"clinical_digest\": \"...\"\n"
+        f"}}\n\n"
         f"Title: {title}\n"
         f"Abstract: {clean_abstract[:1500]}"
     )
+
+    final_text = ""
 
     # 1. Try Custom Hosted MedGemma API URL (e.g. vLLM or Ollama deployment)
     if MEDGEMMA_API_URL:
@@ -292,26 +347,22 @@ def _generate_summary(title: str, abstract: str) -> str:
                 "model": model_name,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.1,
-                "max_tokens": 250
+                "max_tokens": 350
             }
             resp = requests.post(MEDGEMMA_API_URL, json=payload, headers=headers, timeout=10)
             if resp.status_code == 200:
                 resp_json = resp.json()
                 if "choices" in resp_json:
-                    final_summary = resp_json["choices"][0]["message"]["content"].strip()
+                    final_text = resp_json["choices"][0]["message"]["content"].strip()
                 elif "response" in resp_json:
-                    final_summary = resp_json["response"].strip()
+                    final_text = resp_json["response"].strip()
                 else:
-                    final_summary = resp_json.get("text", "").strip()
-                
-                if final_summary:
-                    cache_summary(content_hash, final_summary)
-                    return final_summary
+                    final_text = resp_json.get("text", "").strip()
         except Exception as e:
             logger.warning(f"[Research Summary] MedGemma Custom API call failed: {e}. Trying Vertex AI...")
 
     # 2. Try Vertex AI custom endpoint if configured
-    if VERTEX_ENDPOINT_ID and VERTEX_PROJECT and VERTEX_ENDPOINT_ID != "your-deployed-endpoint-id":
+    if not final_text and VERTEX_ENDPOINT_ID and VERTEX_PROJECT and VERTEX_ENDPOINT_ID != "your-deployed-endpoint-id":
         try:
             from google.cloud import aiplatform
             creds = get_gcp_credentials()
@@ -320,40 +371,34 @@ def _generate_summary(title: str, abstract: str) -> str:
             response = endpoint.predict(instances=[{"prompt": prompt}])
             if response.predictions:
                 pred = response.predictions[0]
-                final_summary = pred.get("content", "").strip() if isinstance(pred, dict) else str(pred).strip()
-                if final_summary:
-                    cache_summary(content_hash, final_summary)
-                    return final_summary
+                final_text = pred.get("content", "").strip() if isinstance(pred, dict) else str(pred).strip()
         except Exception as e:
             logger.warning(f"[Research Summary] Vertex AI MedGemma endpoint prediction failed: {e}. Trying Google AI Studio...")
 
     # 3. Fallback to Google AI Studio Gemma 4
-    try:
-        response = _gemma.generate_content(prompt)
-        final_summary = response.text.strip().replace("**", "")
-        
-        # If Gemma returned a reasoning trace, extract the final clean summary from the last lines
-        if "\n" in final_summary:
-            lines = [line.strip() for line in final_summary.split("\n") if line.strip()]
-            for line in reversed(lines):
-                if not line.startswith(("*", "-", "#", "Role:", "Task:", "Input:", "Constraint:", "Draft:", "Sentence:", "Final check:")) and len(line) > 50:
-                    final_summary = line
-                    break
-                    
-        # Store in Firestore cache
-        cache_summary(content_hash, final_summary)
-        return final_summary
-    except Exception as e:
-        logger.warning(f"[Research Summary] Gemma 4 31B failed: {e}. Falling back to gemini-2.5-flash...")
+    if not final_text:
         try:
-            fallback_model = genai.GenerativeModel(model_name="gemini-2.5-flash")
-            response = fallback_model.generate_content(prompt)
-            final_summary = response.text.strip().replace("**", "")
-            cache_summary(content_hash, final_summary)
-            return final_summary
-        except Exception as e2:
-            logger.error(f"[Research Summary] Gemini fallback also failed: {e2}")
-            return clean_abstract[:280] + "..."
+            response = _gemma.generate_content(prompt)
+            final_text = response.text.strip().replace("**", "")
+            if "\n" in final_text and not (final_text.startswith("{") or "{" in final_text):
+                lines = [line.strip() for line in final_text.split("\n") if line.strip()]
+                for line in reversed(lines):
+                    if not line.startswith(("*", "-", "#", "Role:", "Task:", "Input:", "Constraint:", "Draft:", "Sentence:", "Final check:")) and len(line) > 50:
+                        final_text = line
+                        break
+        except Exception as e:
+            logger.warning(f"[Research Summary] Gemma 4 failed: {e}. Falling back to gemini-2.5-flash...")
+            try:
+                fallback_model = genai.GenerativeModel(model_name="gemini-2.5-flash")
+                response = fallback_model.generate_content(prompt)
+                final_text = response.text.strip().replace("**", "")
+            except Exception as e2:
+                logger.error(f"[Research Summary] Gemini fallback also failed: {e2}")
+                final_text = clean_abstract[:280] + "..."
+
+    parsed = parse_json_summary(final_text)
+    cache_summary(content_hash, parsed["summary"], parsed["clinical_digest"])
+    return parsed
 
 
 class ReadRequest(BaseModel):
@@ -364,6 +409,12 @@ class BookmarkRequest(BaseModel):
     user_id: str
     item_id: str
     bookmarked: bool
+    tags: List[str] | None = None
+
+class BookmarkTagUpdateRequest(BaseModel):
+    user_id: str
+    item_id: str
+    tags: List[str]
 
 @router.post("/research/read")
 async def post_read_status(req: ReadRequest):
@@ -376,13 +427,33 @@ async def post_read_status(req: ReadRequest):
 @router.post("/research/bookmark")
 async def post_bookmark_status(req: BookmarkRequest):
     """Bookmarks or unbookmarks a feed item for the physician."""
-    success = toggle_bookmark(user_id=req.user_id, item_id=req.item_id, bookmarked=req.bookmarked)
+    success = toggle_bookmark(user_id=req.user_id, item_id=req.item_id, bookmarked=req.bookmarked, tags=req.tags)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to toggle bookmark status.")
     return {"status": "success", "message": "Bookmark status updated successfully."}
 
+@router.post("/research/bookmark/tags")
+async def post_bookmark_tags(req: BookmarkTagUpdateRequest):
+    """Updates the tags on an existing bookmark."""
+    success = update_bookmark_tags(user_id=req.user_id, item_id=req.item_id, tags=req.tags)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update bookmark tags.")
+    return {"status": "success", "message": "Bookmark tags updated successfully."}
+
 @router.get("/research/bookmarks")
-async def get_bookmarks(user_id: str = Query(...)):
-    """Retrieves all bookmarked item IDs for the physician."""
-    bookmarked_ids = get_bookmarked_feed_ids(user_id=user_id)
-    return {"bookmarked_ids": bookmarked_ids}
+async def get_bookmarks(
+    user_id: str = Query(...),
+    tag: str | None = Query(default=None)
+):
+    """Retrieves bookmarked item IDs for the physician, optionally filtered by tag.
+    When no tag filter is applied, returns full bookmark data with tags.
+    """
+    if tag:
+        bookmarked_ids = get_bookmarked_feed_ids(user_id=user_id, tag=tag)
+        return {"bookmarked_ids": bookmarked_ids}
+    
+    # Return enriched data with tags when no filter specified
+    bookmarks = get_bookmarks_with_tags(user_id=user_id)
+    bookmarked_ids = [b["item_id"] for b in bookmarks]
+    return {"bookmarked_ids": bookmarked_ids, "bookmarks": bookmarks}
+

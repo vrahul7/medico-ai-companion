@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.medicofeeds.data.DataRepository
 import com.example.medicofeeds.data.api.RetrofitClient
+import com.example.medicofeeds.data.model.BookmarkTag
 import com.example.medicofeeds.data.model.FeedbackRequest
 import com.example.medicofeeds.data.model.FeedItem
 import com.google.firebase.auth.FirebaseAuth
@@ -33,6 +34,10 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
 
     private val _readIds = MutableStateFlow<Set<String>>(emptySet())
     val readIds: StateFlow<Set<String>> = _readIds.asStateFlow()
+
+    // Bookmark tag selection state
+    private val _pendingBookmarkItem = MutableStateFlow<FeedItem?>(null)
+    val pendingBookmarkItem: StateFlow<FeedItem?> = _pendingBookmarkItem.asStateFlow()
 
     private var guidelinesPage = 1
     private var academicPage = 1
@@ -114,23 +119,47 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
         }
     }
 
-    fun toggleBookmark(item: FeedItem) {
+    /** Opens the tag selection bottom sheet for a specific item */
+    fun requestBookmarkWithTags(item: FeedItem) {
+        _pendingBookmarkItem.value = item
+    }
+
+    /** Dismisses the tag selection bottom sheet */
+    fun dismissBookmarkSheet() {
+        _pendingBookmarkItem.value = null
+    }
+
+    /** Confirms bookmark with selected tags */
+    fun confirmBookmarkWithTags(item: FeedItem, tags: Set<BookmarkTag>, customTag: String? = null) {
         viewModelScope.launch {
             try {
                 val userId = FirebaseAuth.getInstance().currentUser?.uid ?: "anonymous_physician"
-                val isCurrentlyBookmarked = _bookmarkedIds.value.contains(item.id)
-                val newBookmarkedState = !isCurrentlyBookmarked
-                
-                repository.toggleBookmark(userId, item, newBookmarkedState)
-                
-                _bookmarkedIds.value = if (newBookmarkedState) {
-                    _bookmarkedIds.value + item.id
-                } else {
-                    _bookmarkedIds.value - item.id
-                }
+                repository.toggleBookmark(userId, item, true, tags, customTag)
+                _bookmarkedIds.value = _bookmarkedIds.value + item.id
             } catch (e: Exception) {
                 // Fail silently
             }
+        }
+        _pendingBookmarkItem.value = null
+    }
+
+    fun toggleBookmark(item: FeedItem) {
+        val isCurrentlyBookmarked = _bookmarkedIds.value.contains(item.id)
+        
+        if (isCurrentlyBookmarked) {
+            // Unbookmark immediately (no tag sheet needed)
+            viewModelScope.launch {
+                try {
+                    val userId = FirebaseAuth.getInstance().currentUser?.uid ?: "anonymous_physician"
+                    repository.toggleBookmark(userId, item, false)
+                    _bookmarkedIds.value = _bookmarkedIds.value - item.id
+                } catch (e: Exception) {
+                    // Fail silently
+                }
+            }
+        } else {
+            // Show tag selection sheet for new bookmarks
+            requestBookmarkWithTags(item)
         }
     }
 

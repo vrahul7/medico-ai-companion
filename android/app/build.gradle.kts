@@ -97,6 +97,7 @@ dependencies {
   implementation(libs.firebase.firestore)
   implementation(libs.firebase.analytics)
   implementation(libs.firebase.crashlytics)
+  implementation(libs.firebase.messaging)
 
   // Retrofit Network Layer
   implementation(libs.retrofit)
