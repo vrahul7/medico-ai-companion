@@ -78,7 +78,7 @@ fun MainScreen(
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.ListAlt, contentDescription = "Guidelines") },
+                    icon = { Icon(Icons.Default.ListAlt, contentDescription = "Guidelines", modifier = Modifier.size(24.dp)) },
                     label = { Text("Guidelines", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = SlatePrimary,
@@ -91,7 +91,7 @@ fun MainScreen(
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    icon = { Icon(Icons.Default.Feed, contentDescription = "Feeds") },
+                    icon = { Icon(Icons.Default.Feed, contentDescription = "Feeds", modifier = Modifier.size(24.dp)) },
                     label = { Text("Feeds", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = SlatePrimary,
@@ -104,7 +104,7 @@ fun MainScreen(
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Calculate, contentDescription = "Calculators") },
+                    icon = { Icon(Icons.Default.Calculate, contentDescription = "Calculators", modifier = Modifier.size(24.dp)) },
                     label = { Text("Calculators", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = SlatePrimary,
@@ -117,7 +117,7 @@ fun MainScreen(
                 NavigationBarItem(
                     selected = selectedTab == 3,
                     onClick = { selectedTab = 3 },
-                    icon = { Icon(Icons.Default.Person, contentDescription = "Profile") },
+                    icon = { Icon(Icons.Default.Person, contentDescription = "Profile", modifier = Modifier.size(24.dp)) },
                     label = { Text("Profile", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = SlatePrimary,

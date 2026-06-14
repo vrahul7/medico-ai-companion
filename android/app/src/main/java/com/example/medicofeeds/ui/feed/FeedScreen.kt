@@ -117,11 +117,12 @@ fun FeedScreen(
                             Text("No recent feeds available", color = TextMuted)
                         }
                     } else {
-                        val pagerState = rememberPagerState(pageCount = { items.size })
+                        val pageCount = if (state.hasMore) items.size + 1 else items.size
+                        val pagerState = rememberPagerState(pageCount = { pageCount })
 
                         // Trigger next page fetching
                         LaunchedEffect(pagerState.currentPage) {
-                            if (pagerState.currentPage >= items.size - 2) {
+                            if (pagerState.currentPage >= items.size - 1) {
                                 viewModel.loadNextPage()
                             }
                         }
@@ -153,26 +154,34 @@ fun FeedScreen(
                             state = pagerState,
                             modifier = Modifier.fillMaxSize()
                         ) { page ->
-                            val item = items[page]
-                            val isBookmarked = bookmarkedIds.contains(item.id)
-                            FeedCard(
-                                item = item,
-                                isBookmarked = isBookmarked,
-                                onToggleBookmark = { viewModel.toggleBookmark(item) },
-                                onSubmitFeedback = { rating ->
-                                    viewModel.submitFeedback(item.id, rating)
-                                    // Track feedback in Firebase Analytics
-                                    val bundle = Bundle().apply {
-                                        putString("item_id", item.id)
-                                        putString("rating", rating)
-                                    }
-                                    firebaseAnalytics.logEvent("rate_summary", bundle)
-                                },
-                                onReadClick = { activeViewUrl = item.fullTextUrl },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(horizontal = 16.dp, vertical = 24.dp)
-                            )
+                            if (page < items.size) {
+                                val item = items[page]
+                                val isBookmarked = bookmarkedIds.contains(item.id)
+                                FeedCard(
+                                    item = item,
+                                    isBookmarked = isBookmarked,
+                                    onToggleBookmark = { viewModel.toggleBookmark(item) },
+                                    onSubmitFeedback = { rating ->
+                                        viewModel.submitFeedback(item.id, rating)
+                                        // Track feedback in Firebase Analytics
+                                        val bundle = Bundle().apply {
+                                            putString("item_id", item.id)
+                                            putString("rating", rating)
+                                        }
+                                        firebaseAnalytics.logEvent("rate_summary", bundle)
+                                    },
+                                    onReadClick = { activeViewUrl = item.fullTextUrl },
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                                )
+                            } else {
+                                LoadingCard(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -332,7 +341,8 @@ fun FeedCard(
                         Icon(
                             imageVector = Icons.Outlined.ThumbUp,
                             contentDescription = "Helpful",
-                            tint = if (feedbackState == "up") TealSecondary else TextMuted
+                            tint = if (feedbackState == "up") TealSecondary else TextMuted,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
@@ -345,7 +355,8 @@ fun FeedCard(
                         Icon(
                             imageVector = Icons.Outlined.ThumbDown,
                             contentDescription = "Not Helpful",
-                            tint = if (feedbackState == "down") ErrorRed else TextMuted
+                            tint = if (feedbackState == "down") ErrorRed else TextMuted,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
@@ -362,7 +373,8 @@ fun FeedCard(
                         Icon(
                             imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Outlined.BookmarkBorder,
                             contentDescription = if (isBookmarked) "Remove Bookmark" else "Bookmark",
-                            tint = if (isBookmarked) TealSecondary else TextWhite
+                            tint = if (isBookmarked) TealSecondary else TextWhite,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
@@ -380,7 +392,8 @@ fun FeedCard(
                         Icon(
                             imageVector = Icons.Default.Share,
                             contentDescription = "Share",
-                            tint = TextWhite
+                            tint = TextWhite,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
@@ -395,7 +408,7 @@ fun FeedCard(
                             imageVector = Icons.Default.ExitToApp,
                             contentDescription = null,
                             tint = Color.Black,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
@@ -498,6 +511,44 @@ fun InAppBrowser(url: String, onDismiss: () -> Unit) {
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun LoadingCard(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(
+                brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(
+                        CardBg.copy(alpha = 0.85f),
+                        DarkCanvas.copy(alpha = 0.95f)
+                    )
+                )
+            )
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(color = TealSecondary, modifier = Modifier.size(48.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Fetching more clinical insights...",
+                color = TextWhite,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "MedGuide AI is synthesizing summaries from journals and guidelines.",
+                color = TextMuted,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
+            )
         }
     }
 }

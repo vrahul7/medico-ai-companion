@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
 
 sealed interface FeedUiState {
     object Loading : FeedUiState
-    data class Success(val items: List<FeedItem>) : FeedUiState
+    data class Success(val items: List<FeedItem>, val hasMore: Boolean = true) : FeedUiState
     data class Error(val message: String) : FeedUiState
 }
 
@@ -39,9 +39,54 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
 
     private val guidelinesList = mutableListOf<FeedItem>()
     private val academicList = mutableListOf<FeedItem>()
+    
+    private var isLoading = false
 
     init {
         loadBookmarks()
+    }
+
+    private fun parseDateOrYear(dateStr: String): Long {
+        val trimmed = dateStr.trim().lowercase()
+        if (trimmed == "recent" || trimmed.isEmpty()) {
+            return System.currentTimeMillis()
+        }
+        
+        val formats = listOf(
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd",
+            "dd MMM yyyy",
+            "dd MMMM yyyy",
+            "MMM yyyy",
+            "MMMM yyyy",
+            "yyyy"
+        )
+        for (pattern in formats) {
+            try {
+                val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.US)
+                sdf.isLenient = true
+                val date = sdf.parse(dateStr.trim())
+                if (date != null) {
+                    return date.time
+                }
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+
+        val yearRegex = Regex("\\b(19\\d\\d|20\\d\\d)\\b")
+        val match = yearRegex.find(dateStr)
+        if (match != null) {
+            val year = match.value.toLongOrNull()
+            if (year != null) {
+                val cal = java.util.Calendar.getInstance()
+                cal.clear()
+                cal.set(java.util.Calendar.YEAR, year.toInt())
+                return cal.timeInMillis
+            }
+        }
+        
+        return 0L
     }
 
     fun setFeedTypeAndTopic(type: String, topic: String) {
@@ -95,7 +140,10 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
         
         val currentState = _uiState.value
         if (currentState is FeedUiState.Success) {
-            _uiState.value = FeedUiState.Success(currentState.items.filter { it.id != itemId })
+            _uiState.value = FeedUiState.Success(
+                items = currentState.items.filter { it.id != itemId },
+                hasMore = currentState.hasMore
+            )
         }
         
         viewModelScope.launch {
@@ -109,6 +157,8 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
     }
 
     fun loadFeed(reset: Boolean = false) {
+        if (isLoading) return
+        isLoading = true
         viewModelScope.launch {
             if (reset) {
                 _uiState.value = FeedUiState.Loading
@@ -124,7 +174,13 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
                     val existingIds = guidelinesList.map { it.id }.toSet()
                     val uniqueNewItems = items.filter { it.id !in existingIds && it.id !in _readIds.value }
                     guidelinesList.addAll(uniqueNewItems)
-                    _uiState.value = FeedUiState.Success(guidelinesList.filter { it.id !in _readIds.value })
+                    guidelinesList.sortByDescending { parseDateOrYear(it.dateOrYear) }
+                    
+                    val hasMore = items.size >= 5
+                    _uiState.value = FeedUiState.Success(
+                        items = guidelinesList.filter { it.id !in _readIds.value },
+                        hasMore = hasMore
+                    )
                 } else {
                     if (reset) {
                         academicPage = 1
@@ -135,15 +191,24 @@ class FeedScreenViewModel(private val repository: DataRepository) : ViewModel() 
                     val existingIds = academicList.map { it.id }.toSet()
                     val uniqueNewItems = items.filter { it.id !in existingIds && it.id !in _readIds.value }
                     academicList.addAll(uniqueNewItems)
-                    _uiState.value = FeedUiState.Success(academicList.filter { it.id !in _readIds.value })
+                    academicList.sortByDescending { parseDateOrYear(it.dateOrYear) }
+                    
+                    val hasMore = items.size >= 5
+                    _uiState.value = FeedUiState.Success(
+                        items = academicList.filter { it.id !in _readIds.value },
+                        hasMore = hasMore
+                    )
                 }
             } catch (e: Exception) {
                 _uiState.value = FeedUiState.Error(e.message ?: "Failed to fetch clinical feeds")
+            } finally {
+                isLoading = false
             }
         }
     }
 
     fun loadNextPage() {
+        if (isLoading) return
         if (_currentFeedType.value == "guidelines") {
             guidelinesPage++
         } else {
